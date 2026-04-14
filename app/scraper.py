@@ -24,8 +24,65 @@ HEADERS = {
     ),
     "Referer": "https://www.ptt.cc/bbs/Stock/index.html",
 }
-# PTT 需要帶 over18 cookie
 COOKIES = {"over18": "1"}
+
+# 中文公司名 → 標的代號對照表
+# PTT 文章通常用中文名稱，不用股票代號
+CHINESE_NAME_MAP: dict[str, str] = {
+    # 台股
+    "台積電": "2330",
+    "台積":   "2330",
+    "tsmc":   "2330",
+    "鴻海":   "2317",
+    "鴻準":   "2317",
+    "聯發科": "2454",
+    "聯發":   "2454",
+    "廣達":   "2382",
+    "大立光": "3008",
+    "立光":   "3008",
+    "十銓":   "4967",
+    "元大台灣50": "0050",
+    "台灣50": "0050",
+    "中鋼":   "2002",
+    "台塑":   "1301",
+    "南亞":   "1303",
+    "中華電": "2412",
+    "中華電信": "2412",
+    "富邦金": "2881",
+    "國泰金": "2882",
+    "玉山金": "2884",
+    "兆豐金": "2886",
+    "台新金": "2887",
+    "永豐金": "2890",
+    "聯電":   "2303",
+    "瑞昱":   "2379",
+    "日月光": "3711",
+    "華碩":   "2357",
+    "宏碁":   "2353",
+    "台達電": "2308",
+    "研華":   "2395",
+    "緯創":   "3231",
+    "仁寶":   "2324",
+    "緯穎":   "6669",
+    "創意":   "3443",
+    "世芯":   "3661",
+    "力積電": "6770",
+    "欣興":   "3037",
+    "華邦電": "2344",
+    "南亞科": "2408",
+    # 美股
+    "輝達":   "NVDA",
+    "nvidia": "NVDA",
+    "nvda":   "NVDA",
+    "超微":   "AMD",
+    "amd":    "AMD",
+    "蘋果":   "AAPL",
+    "apple":  "AAPL",
+    "微軟":   "MSFT",
+    "microsoft": "MSFT",
+    "英特爾": "INTC",
+    "intel":  "INTC",
+}
 
 
 @dataclass
@@ -38,25 +95,35 @@ class PostInfo:
 def _extract_symbols(title: str, watch_symbols: list[str]) -> list[str]:
     """
     從標題中抽取標的代號。
-    支援格式：
-      - $2330$  $NVDA$  (PTT 慣用標記法)
-      - 純數字代號（2330, 4967）
-      - 英文代號（NVDA, AAPL）
+    支援：
+      1. $2330$ $NVDA$ 格式
+      2. 純數字/英文代號（用非英數字元做邊界，相容中文語境）
+      3. 中文公司名稱對照
     """
     found = set()
+    watch_upper = {s.upper() for s in watch_symbols}
 
-    # 格式 $XXX$
-    dollar_matches = re.findall(r'\$([A-Z0-9]{2,10})\$', title.upper())
-    found.update(dollar_matches)
+    # ── 1. $XXX$ 格式 ─────────────────────────────────────────────
+    for m in re.findall(r'\$([A-Z0-9]{2,10})\$', title.upper()):
+        if m in watch_upper:
+            found.add(m)
 
-    title_upper = title.upper()
-    for sym in watch_symbols:
+    # ── 2. 代號直接出現（用非英數字元做邊界，相容中文）────────────
+    for sym in watch_upper:
+        # (?<![0-9A-Za-z]) 確保前面不是英數；(?![0-9A-Za-z]) 確保後面不是英數
+        if re.search(rf'(?<![0-9A-Za-z]){re.escape(sym)}(?![0-9A-Za-z])', title.upper()):
+            found.add(sym)
+
+    # ── 3. 中文公司名稱對照 ───────────────────────────────────────
+    title_lower = title.lower()
+    for name, sym in CHINESE_NAME_MAP.items():
         sym_upper = sym.upper()
-        # 全詞比對，避免 "23300" 誤命中 "2330"
-        if re.search(rf'\b{re.escape(sym_upper)}\b', title_upper):
+        if sym_upper not in watch_upper:
+            continue
+        if name.lower() in title_lower:
             found.add(sym_upper)
 
-    return [s for s in found if s in [w.upper() for w in watch_symbols]]
+    return list(found)
 
 
 async def _fetch_page(client: httpx.AsyncClient, url: str) -> list[PostInfo]:
@@ -85,6 +152,7 @@ async def _fetch_page(client: httpx.AsyncClient, url: str) -> list[PostInfo]:
         if syms:
             posts.append(PostInfo(title=title, symbols=syms, url=PTT_BASE + href))
 
+    logger.debug("Page %s: found %d matching posts", url, len(posts))
     return posts
 
 
@@ -125,15 +193,16 @@ async def scrape_ptt(max_pages: int | None = None) -> dict[str, list[str]]:
 
             for post in posts:
                 for sym in post.symbols:
-                    symbol_titles[sym].append(post.title)
+                    if sym in symbol_titles:
+                        symbol_titles[sym].append(post.title)
 
-            # 翻到上一頁
             if page_num < pages - 1:
                 prev = await _get_prev_page_url(client, current_url)
                 if prev is None:
                     break
                 current_url = prev
-                await asyncio.sleep(0.5)  # 禮貌性延遲，避免被擋
+                await asyncio.sleep(0.5)
 
-    # 移除沒有資料的標的
-    return {k: v for k, v in symbol_titles.items() if v}
+    matched = {k: v for k, v in symbol_titles.items() if v}
+    logger.info("Scrape complete: %d symbols matched", len(matched))
+    return matched
