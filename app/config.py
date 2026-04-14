@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     SCRAPE_INTERVAL_SECONDS: int = 60
     PTT_BOARD: str = "Stock"
     MAX_PAGES: int = 3
+    SCRAPE_CONTENT: bool = True       # 是否進入文章抓推文
+    MAX_POSTS_PER_RUN: int = 15       # 每輪最多深入爬幾篇
+    REQ_DELAY_MIN: float = 0.8        # 最短請求間隔（秒）
+    REQ_DELAY_MAX: float = 2.5        # 最長請求間隔（秒）
 
     # 監控的股票標的（$標的$格式 或純代號）
     WATCH_SYMBOLS: list[str] = [
