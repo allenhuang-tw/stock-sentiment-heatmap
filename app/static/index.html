@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>股市情緒熱力圖</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --color-panic:   #1e3a5f;
+      --color-bear:    #2563eb;
+      --color-neutral: #374151;
+      --color-bull:    #dc2626;
+      --color-greed:   #7f1d1d;
+    }
+
+    body { background: #0f172a; }
+
+    /* ── 情緒方塊 ── */
+    .symbol-card {
+      transition: transform 0.3s ease, box-shadow 0.3s ease, background-color 0.8s ease;
+      cursor: pointer;
+      border-radius: 12px;
+      overflow: hidden;
+      position: relative;
+    }
+    .symbol-card:hover { transform: scale(1.05); }
+
+    /* 劇烈變動時的閃爍動畫 */
+    @keyframes pulse-glow {
+      0%   { box-shadow: 0 0 0 0 rgba(255,255,255,0.4); transform: scale(1); }
+      40%  { box-shadow: 0 0 0 14px rgba(255,255,255,0); transform: scale(1.06); }
+      100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); transform: scale(1); }
+    }
+    @keyframes shake {
+      0%,100% { transform: translateX(0); }
+      20%     { transform: translateX(-4px); }
+      40%     { transform: translateX(4px); }
+      60%     { transform: translateX(-3px); }
+      80%     { transform: translateX(3px); }
+    }
+
+    .animate-spike { animation: pulse-glow 0.7s ease-out, shake 0.5s ease-out; }
+
+    /* 趨勢箭頭 */
+    .trend-up::after   { content: " ▲"; color: #f87171; font-size: 0.75em; }
+    .trend-down::after { content: " ▼"; color: #60a5fa; font-size: 0.75em; }
+    .trend-flat::after { content: " ─"; color: #9ca3af; font-size: 0.75em; }
+
+    /* 進度條 */
+    .bar-fill { transition: width 0.8s cubic-bezier(0.25,0.46,0.45,0.94); }
+
+    /* 連線狀態點 */
+    @keyframes blink { 50% { opacity: 0; } }
+    .blink { animation: blink 1s step-start infinite; }
+
+    /* Modal 覆蓋 */
+    #modal-overlay {
+      backdrop-filter: blur(4px);
+      transition: opacity 0.2s;
+    }
+
+    /* 捲軸美化 */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #1e293b; }
+    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+  </style>
+</head>
+<body class="min-h-screen text-white font-mono">
+
+  <!-- ── Header ── -->
+  <header class="sticky top-0 z-10 bg-slate-900/90 backdrop-blur border-b border-slate-700 px-6 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <span class="text-2xl">📊</span>
+      <h1 class="text-xl font-bold tracking-wide">股市情緒熱力圖</h1>
+      <span class="text-xs text-slate-400 hidden sm:inline">PTT Stock 板 即時分析</span>
+    </div>
+    <div class="flex items-center gap-4">
+      <div id="ws-status" class="flex items-center gap-1.5 text-xs text-slate-400">
+        <span id="status-dot" class="w-2 h-2 rounded-full bg-gray-500"></span>
+        <span id="status-text">連線中...</span>
+      </div>
+      <div class="text-xs text-slate-500" id="last-update">--:--:--</div>
+      <button onclick="manualTrigger()" class="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg transition">
+        ⚡ 立即更新
+      </button>
+    </div>
+  </header>
+
+  <!-- ── 圖例 ── -->
+  <div class="px-6 pt-4 pb-2 flex items-center gap-2 text-xs text-slate-400">
+    <span>情緒指數：</span>
+    <div class="flex items-center gap-1">
+      <div class="w-4 h-4 rounded" style="background:#1e3a5f"></div><span>極度恐慌</span>
+    </div>
+    <div class="flex items-center gap-1">
+      <div class="w-4 h-4 rounded" style="background:#2563eb"></div><span>悲觀</span>
+    </div>
+    <div class="flex items-center gap-1">
+      <div class="w-4 h-4 rounded" style="background:#374151"></div><span>中性</span>
+    </div>
+    <div class="flex items-center gap-1">
+      <div class="w-4 h-4 rounded" style="background:#dc2626"></div><span>樂觀</span>
+    </div>
+    <div class="flex items-center gap-1">
+      <div class="w-4 h-4 rounded" style="background:#7f1d1d"></div><span>極度貪婪</span>
+    </div>
+  </div>
+
+  <!-- ── 情緒矩陣主體 ── -->
+  <main class="px-4 pb-8">
+    <div id="heatmap-grid"
+         class="grid gap-3"
+         style="grid-template-columns: repeat(auto-fill, minmax(160px,1fr))">
+      <!-- 由 JS 動態填入 -->
+    </div>
+    <div id="empty-state" class="text-center py-20 text-slate-500 hidden">
+      <div class="text-5xl mb-4">🔍</div>
+      <p>暫無資料，等待第一次爬取完成...</p>
+      <p class="text-sm mt-2">或點擊「立即更新」手動觸發</p>
+    </div>
+  </main>
+
+  <!-- ── 詳細 Modal ── -->
+  <div id="modal-overlay" class="fixed inset-0 bg-black/70 z-50 hidden flex items-center justify-center p-4"
+       onclick="closeModal(event)">
+    <div id="modal-box" class="bg-slate-800 rounded-2xl w-full max-w-lg border border-slate-600 shadow-2xl"
+         onclick="event.stopPropagation()">
+      <div class="p-5 border-b border-slate-700 flex justify-between items-center">
+        <h2 id="modal-title" class="text-xl font-bold">--</h2>
+        <button onclick="closeModal()" class="text-slate-400 hover:text-white text-xl">✕</button>
+      </div>
+      <div class="p-5 space-y-4">
+        <!-- 大分數 -->
+        <div class="text-center">
+          <div id="modal-score" class="text-5xl font-black">0.00</div>
+          <div id="modal-label" class="text-sm text-slate-400 mt-1">--</div>
+        </div>
+        <!-- 統計 -->
+        <div class="grid grid-cols-3 gap-3 text-center">
+          <div class="bg-slate-700/50 rounded-xl p-3">
+            <div id="modal-posts" class="text-2xl font-bold">--</div>
+            <div class="text-xs text-slate-400">提及次數</div>
+          </div>
+          <div class="bg-slate-700/50 rounded-xl p-3">
+            <div id="modal-bull" class="text-2xl font-bold text-red-400">--</div>
+            <div class="text-xs text-slate-400">多方帖</div>
+          </div>
+          <div class="bg-slate-700/50 rounded-xl p-3">
+            <div id="modal-bear" class="text-2xl font-bold text-blue-400">--</div>
+            <div class="text-xs text-slate-400">空方帖</div>
+          </div>
+        </div>
+        <!-- 情緒條 -->
+        <div>
+          <div class="flex justify-between text-xs text-slate-400 mb-1">
+            <span>空方 ◀</span><span>▶ 多方</span>
+          </div>
+          <div class="h-3 rounded-full bg-slate-700 overflow-hidden">
+            <div id="modal-bar" class="h-full bar-fill rounded-full" style="width:50%"></div>
+          </div>
+        </div>
+        <!-- 歷史圖表 -->
+        <div>
+          <div class="text-xs text-slate-400 mb-2">近期情緒走勢</div>
+          <div style="height:140px"><canvas id="modal-chart"></canvas></div>
+        </div>
+        <!-- 最新標題 -->
+        <div>
+          <div class="text-xs text-slate-400 mb-2">相關 PTT 標題</div>
+          <ul id="modal-titles" class="space-y-1 text-sm"></ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  // ── 設定 ─────────────────────────────────────────────────────────
+  const WS_URL   = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/sentiment`;
+  const API_BASE = '/api';
+  let   modalChart = null;
+  let   latestData  = {};   // { SYMBOL: {...} }
+  let   prevScores  = {};   // { SYMBOL: score }
+  let   ws, reconnectTimer;
+
+  // ── 顏色計算 ─────────────────────────────────────────────────────
+  function scoreToColor(score) {
+    // -1.0 → 深藍   0 → 灰   +1.0 → 火紅
+    if (score < 0) {
+      const t = Math.abs(score);           // 0~1
+      const r = Math.round(30  + t * (37 - 30));
+      const g = Math.round(58  + t * (58 - 58));
+      const b = Math.round(95  + t * (220- 95));
+      return `rgb(${r},${g},${b})`;
+    } else {
+      const t = score;
+      const r = Math.round(55  + t * (180 - 55));
+      const g = Math.round(65  + t * (20  - 65));
+      const b = Math.round(81  + t * (20  - 81));
+      return `rgb(${r},${g},${b})`;
+    }
+  }
+
+  function scoreToBgGradient(score) {
+    const c = scoreToColor(score);
+    const dark = score >= 0
+      ? `rgb(${Math.round(30+score*80)},${Math.round(10+score*10)},${Math.round(10+score*10)})`
+      : `rgb(${Math.round(10+Math.abs(score)*20)},${Math.round(20+Math.abs(score)*30)},${Math.round(30+Math.abs(score)*90)})`;
+    return `linear-gradient(135deg, ${dark}, ${c})`;
+  }
+
+  function classify(score) {
+    if (score >=  0.6) return '極度貪婪 🔥';
+    if (score >=  0.3) return '樂觀 📈';
+    if (score >=  0.1) return '偏多';
+    if (score >  -0.1) return '中性';
+    if (score >  -0.3) return '偏空';
+    if (score >  -0.6) return '悲觀 📉';
+    return '極度恐慌 💀';
+  }
+
+  // ── 渲染熱力圖 ────────────────────────────────────────────────────
+  function renderGrid(items) {
+    const grid = document.getElementById('heatmap-grid');
+    const empty = document.getElementById('empty-state');
+
+    if (!items.length) { grid.innerHTML = ''; empty.classList.remove('hidden'); return; }
+    empty.classList.add('hidden');
+
+    items.forEach(item => {
+      let card = document.getElementById(`card-${item.symbol}`);
+      const isNew = !card;
+
+      if (isNew) {
+        card = document.createElement('div');
+        card.id = `card-${item.symbol}`;
+        card.className = 'symbol-card p-4 select-none';
+        card.onclick = () => openModal(item.symbol);
+        grid.appendChild(card);
+      }
+
+      // 檢查分數是否劇烈變動（>0.3）
+      const prev = prevScores[item.symbol];
+      const spike = prev !== undefined && Math.abs(item.score - prev) > 0.3;
+      prevScores[item.symbol] = item.score;
+
+      // 更新背景
+      card.style.background = scoreToBgGradient(item.score);
+
+      // 計算多空比例條
+      const total = item.bullish_count + item.bearish_count || 1;
+      const bullPct = Math.round(item.bullish_count / total * 100);
+
+      const trendClass = item.trend === 'up' ? 'trend-up' : item.trend === 'down' ? 'trend-down' : 'trend-flat';
+
+      card.innerHTML = `
+        <div class="text-lg font-black tracking-wider ${trendClass}">${item.symbol}</div>
+        <div class="text-3xl font-black mt-1 mb-2" style="text-shadow:0 2px 8px rgba(0,0,0,0.5)">
+          ${item.score >= 0 ? '+' : ''}${item.score.toFixed(2)}
+        </div>
+        <div class="text-xs opacity-75 mb-2">${classify(item.score)}</div>
+        <div class="h-1.5 rounded-full bg-black/30 overflow-hidden mb-2">
+          <div class="h-full rounded-full bg-white/60 bar-fill" style="width:${bullPct}%"></div>
+        </div>
+        <div class="text-xs opacity-60">${item.post_count} 篇帖子</div>
+      `;
+
+      if (spike) {
+        card.classList.remove('animate-spike');
+        void card.offsetWidth;   // reflow
+        card.classList.add('animate-spike');
+      }
+    });
+
+    // 移除已不在列表中的卡片
+    const symbols = new Set(items.map(i => i.symbol));
+    grid.querySelectorAll('[id^="card-"]').forEach(el => {
+      const sym = el.id.replace('card-', '');
+      if (!symbols.has(sym)) el.remove();
+    });
+  }
+
+  // ── Modal ────────────────────────────────────────────────────────
+  async function openModal(symbol) {
+    const item = latestData[symbol];
+    if (!item) return;
+
+    document.getElementById('modal-overlay').classList.remove('hidden');
+    document.getElementById('modal-title').textContent = symbol;
+    document.getElementById('modal-score').textContent =
+      (item.score >= 0 ? '+' : '') + item.score.toFixed(3);
+    document.getElementById('modal-score').style.color = scoreToColor(item.score);
+    document.getElementById('modal-label').textContent = classify(item.score);
+    document.getElementById('modal-posts').textContent = item.post_count;
+    document.getElementById('modal-bull').textContent  = item.bullish_count;
+    document.getElementById('modal-bear').textContent  = item.bearish_count;
+
+    const total   = item.bullish_count + item.bearish_count || 1;
+    const bullPct = Math.round(item.bullish_count / total * 100);
+    const bar = document.getElementById('modal-bar');
+    bar.style.width = bullPct + '%';
+    bar.style.background = `linear-gradient(90deg, #2563eb ${100 - bullPct}%, #dc2626 ${100 - bullPct}%)`;
+
+    // 標題列表
+    const ul = document.getElementById('modal-titles');
+    ul.innerHTML = (item.sample_titles || [])
+      .map(t => `<li class="text-slate-300 bg-slate-700/40 rounded px-3 py-1.5">📌 ${t}</li>`)
+      .join('') || '<li class="text-slate-500">暫無標題資料</li>';
+
+    // 歷史圖表
+    await loadHistoryChart(symbol);
+  }
+
+  async function loadHistoryChart(symbol) {
+    try {
+      const res  = await fetch(`${API_BASE}/history/${symbol}?limit=30`);
+      const data = await res.json();
+
+      const labels = data.map(d => {
+        const t = new Date(d.recorded_at);
+        return `${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}`;
+      });
+      const scores = data.map(d => d.score);
+
+      if (modalChart) modalChart.destroy();
+      const ctx = document.getElementById('modal-chart').getContext('2d');
+      modalChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            data: scores,
+            borderColor: scores[scores.length - 1] >= 0 ? '#f87171' : '#60a5fa',
+            backgroundColor: 'rgba(255,255,255,0.03)',
+            borderWidth: 2,
+            pointRadius: 2,
+            tension: 0.4,
+            fill: true,
+          }]
+        },
+        options: {
+          animation: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { ticks: { color: '#64748b', font: { size: 9 } }, grid: { color: '#1e293b' } },
+            y: {
+              min: -1, max: 1,
+              ticks: { color: '#64748b', font: { size: 9 },
+                callback: v => (v > 0 ? '+' : '') + v.toFixed(1) },
+              grid: { color: '#1e293b' }
+            }
+          }
+        }
+      });
+    } catch(e) {
+      console.warn('History fetch failed:', e);
+    }
+  }
+
+  function closeModal(e) {
+    if (!e || e.target === document.getElementById('modal-overlay')) {
+      document.getElementById('modal-overlay').classList.add('hidden');
+      if (modalChart) { modalChart.destroy(); modalChart = null; }
+    }
+  }
+
+  // ── API ──────────────────────────────────────────────────────────
+  async function fetchLatest() {
+    try {
+      const res  = await fetch(`${API_BASE}/latest`);
+      const data = await res.json();
+      data.forEach(item => { latestData[item.symbol] = item; });
+      renderGrid(data);
+      document.getElementById('last-update').textContent =
+        new Date().toLocaleTimeString('zh-TW');
+    } catch(e) {
+      console.error('Fetch latest failed:', e);
+    }
+  }
+
+  async function manualTrigger() {
+    try {
+      await fetch(`${API_BASE}/trigger`, { method: 'POST' });
+      const btn = document.querySelector('button[onclick="manualTrigger()"]');
+      btn.textContent = '⏳ 爬取中...';
+      btn.disabled = true;
+      setTimeout(() => {
+        btn.textContent = '⚡ 立即更新';
+        btn.disabled = false;
+        fetchLatest();
+      }, 5000);
+    } catch(e) {
+      console.error('Trigger failed:', e);
+    }
+  }
+
+  // ── WebSocket ────────────────────────────────────────────────────
+  function connectWS() {
+    clearTimeout(reconnectTimer);
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      setStatus('connected');
+      clearTimeout(reconnectTimer);
+    };
+
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'update' && msg.data) {
+          msg.data.forEach(item => { latestData[item.symbol] = item; });
+          renderGrid(Object.values(latestData));
+          document.getElementById('last-update').textContent =
+            new Date().toLocaleTimeString('zh-TW');
+        }
+      } catch(_) {}
+    };
+
+    ws.onerror = () => setStatus('error');
+
+    ws.onclose = () => {
+      setStatus('disconnected');
+      reconnectTimer = setTimeout(connectWS, 5000);
+    };
+
+    // 心跳
+    setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send('ping');
+    }, 25000);
+  }
+
+  function setStatus(state) {
+    const dot  = document.getElementById('status-dot');
+    const text = document.getElementById('status-text');
+    const map  = {
+      connected:    ['bg-green-400',  '已連線'],
+      disconnected: ['bg-gray-500',   '已斷線，重連中...'],
+      error:        ['bg-yellow-400', '連線異常'],
+    };
+    const [cls, label] = map[state] || ['bg-gray-500', '未知'];
+    dot.className  = `w-2 h-2 rounded-full ${cls}${state === 'disconnected' ? ' blink' : ''}`;
+    text.textContent = label;
+  }
+
+  // ── 初始化 ───────────────────────────────────────────────────────
+  fetchLatest();
+  connectWS();
+  // 每 60 秒備用輪詢（WebSocket 掉線時保底）
+  setInterval(fetchLatest, 60000);
+  </script>
+</body>
+</html>
