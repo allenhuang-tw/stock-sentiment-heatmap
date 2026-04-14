@@ -254,22 +254,44 @@ async def scrape_ptt(max_pages: int | None = None) -> dict[str, list[str]]:
             await asyncio.gather(*tasks)
 
     # ── 整合結果 ───────────────────────────────────────────────────
-    symbol_texts: dict[str, list[str]] = {s: [] for s in watch_symbols}
+    # 結構：{ symbol: {"titles": [...], "push_texts": [...], "push_scores": [...]} }
+    symbol_data: dict[str, dict] = {
+        s: {"titles": [], "push_texts": [], "push_scores": []}
+        for s in watch_symbols
+    }
 
     for post in all_posts:
         for sym in post.symbols:
-            if sym not in symbol_texts:
+            if sym not in symbol_data:
                 continue
-            # 加入標題
-            symbol_texts[sym].append(post.title)
-            # 加入推文（有情緒傾向的優先）
-            for text, score in zip(post.push_texts, post.push_scores):
-                if text.strip():
-                    # 在文字前加入推/噓標記，讓情緒分析器能讀到
-                    prefix = "好棒 " if score > 0 else ("救命 " if score < 0 else "")
-                    symbol_texts[sym].append(prefix + text)
 
-    matched = {k: v for k, v in symbol_texts.items() if v}
-    logger.info("Scrape complete: %d symbols matched, total %d texts",
-                len(matched), sum(len(v) for v in matched.values()))
-    return matched
+            # 文章標題一定歸屬於該標的
+            symbol_data[sym]["titles"].append(post.title)
+
+            # 推文：只加入「有提到該標的」或「來自只討論該標的的文章」的推文
+            single_symbol_post = len(post.symbols) == 1
+            for text, score in zip(post.push_texts, post.push_scores):
+                if not text.strip():
+                    continue
+                push_mentions = _extract_symbols(text, watch_symbols)
+                if single_symbol_post or sym in push_mentions or not push_mentions:
+                    # 文章只提一個標的 → 所有推文都歸它
+                    # 推文有明確提到該標的 → 歸它
+                    # 推文沒提任何標的 → 視為對該文章的通用回應，歸屬文章標的
+                    prefix = "好棒 " if score > 0 else ("救命 " if score < 0 else "")
+                    symbol_data[sym]["push_texts"].append(prefix + text)
+                    symbol_data[sym]["push_scores"].append(score)
+
+    # 回傳格式轉換：合併 titles + push_texts 供情緒分析，titles 另外保留供展示
+    result: dict[str, dict] = {}
+    for sym, data in symbol_data.items():
+        if not data["titles"]:
+            continue
+        result[sym] = {
+            "all_texts": data["titles"] + data["push_texts"],
+            "titles": data["titles"],          # 只有文章標題（給 sample_titles 用）
+            "push_scores": data["push_scores"],
+        }
+
+    logger.info("Scrape complete: %d symbols matched", len(result))
+    return result

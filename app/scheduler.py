@@ -44,19 +44,25 @@ async def _run_scrape_and_analyze():
     results = []
     async with AsyncSessionLocal() as session:
         session: AsyncSession
-        for symbol, titles in symbol_titles.items():
-            scores = [analyze(t) for t in titles]
-            avg_score = batch_analyze(titles)
+        for symbol, data in symbol_titles.items():
+            all_texts   = data["all_texts"]    # 標題 + 推文，用於情緒分析
+            post_titles = data["titles"]        # 只有文章標題，用於展示
+            push_scores = data["push_scores"]
+
+            scores = [analyze(t) for t in all_texts]
+            avg_score = batch_analyze(all_texts)
+
+            # 推/噓直接影響多空計數
             bullish = sum(1 for s in scores if s > 0.1)
             bearish = sum(1 for s in scores if s < -0.1)
 
             record = SentimentRecord(
                 symbol=symbol,
                 score=avg_score,
-                post_count=len(titles),
+                post_count=len(post_titles),
                 bullish_count=bullish,
                 bearish_count=bearish,
-                sample_titles=json.dumps(titles[:5], ensure_ascii=False),
+                sample_titles=json.dumps(post_titles[:5], ensure_ascii=False),
                 recorded_at=datetime.utcnow(),
             )
             session.add(record)
@@ -64,7 +70,7 @@ async def _run_scrape_and_analyze():
 
             logger.info(
                 "Symbol %-8s | score=%+.3f | posts=%d (B:%d/Br:%d)",
-                symbol, avg_score, len(titles), bullish, bearish,
+                symbol, avg_score, len(post_titles), bullish, bearish,
             )
 
         await session.commit()
