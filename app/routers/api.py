@@ -6,7 +6,7 @@ POST /api/trigger    - 手動觸發一次爬蟲（測試用）
 """
 import json
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import select, desc
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 async def get_latest(session: AsyncSession = Depends(get_session)):
     """每個標的取最新一筆情緒快照，並附上趨勢方向"""
     # 取最近 2 小時內的最新記錄
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+    cutoff = datetime.utcnow() - timedelta(hours=2)
 
     stmt = (
         select(SentimentRecord)
